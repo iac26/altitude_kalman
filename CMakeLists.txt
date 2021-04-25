@@ -211,7 +211,7 @@ include_directories(
 
 
 add_executable(kalman src/kalman.cpp)
-target_link_libraries(kalman ${catkin_LIBRARIES})
+target_link_libraries(kalman ${catkin_LIBRARIES} Eigen3::Eigen)
 
 
 

@@ -7,13 +7,14 @@
 
 #include <iostream>
 #include <eigen3/Eigen/Dense>
-#include <unsupported/Eigen/MatrixFunctions>
+#include <eigen3/unsupported/Eigen/MatrixFunctions>
+#include <math.h>
 
 #include "ros/ros.h"
 #include "sensor_msgs/NavSatFix.h"
 #include "sensor_msgs/FluidPressure.h"
 
-
+#include "geometry_msgs/Vector3Stamped.h"
 
 /*
  * CONSTANTS
@@ -64,6 +65,8 @@ typedef Eigen::Matrix<double, 6, 3> Mat63;
 
 typedef Eigen::Matrix<double, 6, 1> Mat61;
 
+typedef Eigen::Matrix<double, 1, 6> Mat16;
+
 typedef Eigen::Matrix<double, 1, 1> Mat11;
 
 typedef Eigen::Matrix<double, 3, 3> Mat33;
@@ -93,13 +96,19 @@ static Mat63 G;
 
 static double last_time;
 
+static Mat66 I;
 
+static ros::Publisher height_pub; 
 
-void initialization(void) {
+static bool first;
 
-	X_tilde << 0, 0, 0, 0, 0, 0;
+void initialize(void) {
+
+	X_tilde << 516.0, 0, 0, 9620000, M/(R*T), 516.0;
 
 	P_tilde << DIAG6(25.0, 0.25, 0.25, 25.0, 1e-13, 25.0);
+	
+	I << DIAG6(1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
 
 
 	X_hat << X_tilde;
@@ -126,11 +135,19 @@ void initialization(void) {
 		 0,  0,  1,   
 		 0,  0,  0; 
 
+	first = true;
+
 
 }
 
-void prediction(double time) {
+void predict(double time) {
 	double dt = time - last_time;
+	if(dt <= 0) {
+		return;
+	}
+
+	ROS_INFO("dt: %lf", dt);
+
 	//Create the discrete matrix
 	Eigen::Matrix<double, 12, 12> A;
 	A.block<6, 6>(0, 0) << -F;
@@ -139,33 +156,106 @@ void prediction(double time) {
 	A.block<6, 6>(0, 6) << G*Q*G.transpose();
 	Eigen::Matrix<double, 12, 12> B = A.exp();
 
-	Mat66 PHI << B.block<6, 6>(6, 6).transpose();
-	Mat66 Q_w << PHI*B.block<6, 6>(0, 6);
+	Mat66 PHI;
+	PHI << B.block<6, 6>(6, 6).transpose();
+	Mat66 Q_w;
+	Q_w << PHI*B.block<6, 6>(0, 6);
 	
 	//Compute step
 	X_tilde << PHI*X_hat;
 	P_tilde << PHI*P_hat*PHI.transpose() + Q_w;
 
-	time_last = time;
+	last_time = time;
 
 }
 
-void update_baro(void) {
+void update_baro(double p) {
+	double h = X_tilde(0, 0);
+	double p0 = X_tilde(3, 0);
+	double k = X_tilde(4, 0);
+	double h0 = X_tilde(5, 0);
+
+	double p_est = p0*exp(k*g*(h0-h));
+
+	Mat16 H;
+	H << -k*g*p_est, 0.0, 0.0, p_est/p0, g*(h0-h)*p_est, k*g*p_est;
+
+	Mat61 K;
+	K << P_tilde*H.transpose()*(H*P_tilde*H.transpose() + R_baro).inverse();
+
+	X_hat << X_tilde + K*(p - p_est);
+	
+	P_hat << (I - K*H)*P_tilde;
+
+	ROS_INFO("baro: %lf", p);
+
 
 }
 
-void update_gnss(void) {
+void update_gnss(double z) {
+	Mat16 H;
+	H << 1.0, 0.0, 0.0, 0.0, 0.0, 0.0;
 
+	Mat61 K;
+	K << P_tilde*H.transpose()*(H*P_tilde*H.transpose() + R_gps).inverse();
+
+	X_hat << X_tilde + K*(z - H*X_tilde);
+
+	P_hat << (I - K*H)*P_tilde;
+
+	ROS_INFO("gnss: %lf", z);
 }
 
-
+void display(void) {
+	ROS_INFO("[%lf] z: %g", last_time, X_tilde(0, 0));
+}
 
 void baro_callback(const sensor_msgs::FluidPressure::ConstPtr& data) {
+	double pressure = data->fluid_pressure;
+	double time = data->header.stamp.nsec/1e9 + data->header.stamp.sec;
 
+	if(first) {
+		last_time = time;
+		first = false;
+		return;
+	}
+
+	predict(time);
+
+	update_baro(pressure);
+
+	geometry_msgs::Vector3Stamped pose;
+	pose.vector.z = X_tilde(0, 0);
+	pose.header.stamp.sec = time;
+
+	height_pub.publish(pose);
+
+	display();
 
 }
 
 void gnss_callback(const sensor_msgs::NavSatFix::ConstPtr& data) {
+	double altitude = data->altitude;
+	double time = data->header.stamp.nsec/1e9 + data->header.stamp.sec;
+
+	if(first) {
+		last_time = time;
+		first = false;
+		return;
+	}
+
+
+	predict(time);
+
+	update_gnss(altitude);
+
+	geometry_msgs::Vector3Stamped pose;
+	pose.vector.z = X_tilde(0, 0);
+	pose.header.stamp.sec = time;
+
+	height_pub.publish(pose);
+
+	display();
 
 
 }
@@ -173,7 +263,7 @@ void gnss_callback(const sensor_msgs::NavSatFix::ConstPtr& data) {
 int main(int argc, char ** argv) {
 	ros::init(argc, argv, "kalman");
 
-	initialization();
+	initialize();
 
 	
 	ros::NodeHandle n;
@@ -182,6 +272,8 @@ int main(int argc, char ** argv) {
 
 	ros::Subscriber gnss_sub = n.subscribe("/iris_1/global_position/raw/fix", 1000, gnss_callback);
 	
+	height_pub = n.advertise<geometry_msgs::Vector3Stamped>("/height", 1000);
+
 	ros::spin();
 	
 	return 0;
