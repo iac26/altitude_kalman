@@ -21,7 +21,7 @@
  */
 
 #define g 		9.81
-#define M 		0.2897
+#define M 		0.02897
 #define R		8.3145
 #define T		298.15
 
@@ -102,26 +102,23 @@ static bool first;
 
 void initialize(void) {
 
-	X_tilde << 516.0, 0, 0, 9620000, M/(R*T), 516.0;
+	X_tilde << 516.0, 0, 0, 97.05*1000, M/(R*T), 516.0;
 
-	P_tilde << DIAG6(25.0, 0.25, 0.25, 25.0, 1e-13, 25.0);
-	
-	I << DIAG6(1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
-
+	P_tilde.diagonal() << 25.0, 0.25, 0.25, 25.0, 1e-12, 25.0;	
 
 	X_hat << X_tilde;
 
 	P_hat << P_tilde;
 
-	R_gps << sigma_z_gps*sigma_z_gps;
+	R_gps << pow(sigma_z_gps, 2);
 
-	R_baro << sigma_z_baro*sigma_z_baro;
+	R_baro << pow(sigma_z_baro, 2);
 
-	Q << DIAG3(sigma_a*sigma_a, sigma_p0*sigma_p0, sigma_k*sigma_k);
+	Q.diagonal() << pow(sigma_a,2),  pow(sigma_p0, 2), pow(sigma_k, 2);
 
 	F <<     0,  1,  0,  0,  0,  0, 
-		 0,  0,  0,  0,  0,  0, 
 		 0,  0,  1,  0,  0,  0, 
+		 0,  0,  0,  0,  0,  0, 
 		 0,  0,  0,  0,  0,  0, 
 		 0,  0,  0,  0,  0,  0, 
 		 0,  0,  0,  0,  0,  0;
@@ -138,21 +135,16 @@ void initialize(void) {
 
 }
 
-void predict(double time) {
-	double dt = time - last_time;
-	if(dt <= 0) {
-		return;
-	}
-
-	ROS_INFO("dt: %lf", dt);
+void predict(double dt) {
+	
+	//ROS_INFO("dt: %lf", dt);
 
 	//Create the discrete matrix
 	Eigen::Matrix<double, 12, 12> A;
-	A.block<6, 6>(0, 0) << -F;
-	A.block<6, 6>(6, 0) << DIAG6(0.0, 0.0, 0.0, 0.0, 0.0, 0.0); 
-	A.block<6, 6>(6, 6) << F.transpose();
-	A.block<6, 6>(0, 6) << G*Q*G.transpose();
-	Eigen::Matrix<double, 12, 12> B = A.exp();
+	A << -F, G*Q*G.transpose(), Eigen::MatrixXd::Zero(6, 6), F.transpose();
+	A << A*dt;
+	Eigen::Matrix<double, 12, 12> B;
+	B << A.exp();
 
 	Mat66 PHI;
 	PHI << B.block<6, 6>(6, 6).transpose();
@@ -163,7 +155,7 @@ void predict(double time) {
 	X_tilde << PHI*X_hat;
 	P_tilde << PHI*P_hat*PHI.transpose() + Q_w;
 
-	last_time = time;
+
 
 }
 
@@ -180,12 +172,12 @@ void update_baro(double p) {
 
 	Mat61 K;
 	K << P_tilde*H.transpose()*(H*P_tilde*H.transpose() + R_baro).inverse();
-
+	ROS_INFO("INNOV: %lf", p- p_est);
 	X_hat << X_tilde + K*(p - p_est);
 	
-	P_hat << (I - K*H)*P_tilde;
+	P_hat << (Eigen::MatrixXd::Identity(6,6) - K*H)*P_tilde;
 
-	ROS_INFO("baro: %lf", p);
+	//ROS_INFO("baro: %lf", p);
 
 
 }
@@ -197,28 +189,37 @@ void update_gnss(double z) {
 	Mat61 K;
 	K << P_tilde*H.transpose()*(H*P_tilde*H.transpose() + R_gps).inverse();
 
-	X_hat << X_tilde + K*(z - H*X_tilde);
+	X_hat << X_tilde + K*(z - X_tilde(0));
 
-	P_hat << (I - K*H)*P_tilde;
+	P_hat << (Eigen::MatrixXd::Identity(6,6) - K*H)*P_tilde;
 
-	ROS_INFO("gnss: %lf", z);
+	//ROS_INFO("gnss: %lf", z);
 }
 
 void display(void) {
-	ROS_INFO("[%lf] z: %g", last_time, X_tilde(0, 0));
+	//ROS_INFO("[%lf] z: %g", last_time, X_tilde(0, 0));
 }
 
 void baro_callback(const sensor_msgs::FluidPressure::ConstPtr& data) {
-	double pressure = data->fluid_pressure;
-	double time = data->header.stamp.nsec/1e9 + data->header.stamp.sec;
+	double pressure = data->fluid_pressure/100.0;
+	double time = data->header.stamp.toSec();
 
+	
 	if(first) {
 		last_time = time;
 		first = false;
 		return;
 	}
 
-	predict(time);
+	double dt = time - last_time;
+	
+	last_time = time;
+
+	if(dt <= 0) {
+		return;
+	}
+
+	predict(dt);
 
 	update_baro(pressure);
 
@@ -234,7 +235,7 @@ void baro_callback(const sensor_msgs::FluidPressure::ConstPtr& data) {
 
 void gnss_callback(const sensor_msgs::NavSatFix::ConstPtr& data) {
 	double altitude = data->altitude;
-	double time = data->header.stamp.nsec/1e9 + data->header.stamp.sec;
+	double time = data->header.stamp.toSec();
 
 	if(first) {
 		last_time = time;
@@ -242,8 +243,15 @@ void gnss_callback(const sensor_msgs::NavSatFix::ConstPtr& data) {
 		return;
 	}
 
+	double dt = time - last_time;
+	
+	last_time = time;
 
-	predict(time);
+	if(dt <= 0) {
+		return;
+	}
+
+	predict(dt);
 
 	update_gnss(altitude);
 
