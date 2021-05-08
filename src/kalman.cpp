@@ -102,7 +102,7 @@ static bool first;
 
 void initialize(void) {
 
-	X_tilde << 516.0, 0, 0, 97.05*1000, M/(R*T), 516.0;
+	X_tilde << 471.0, 0, 0, 96.2*1000, M/(R*T), 471.0;
 
 	P_tilde.diagonal() << 25.0, 0.25, 0.25, 25.0, 1e-12, 25.0;	
 
@@ -172,7 +172,7 @@ void update_baro(double p) {
 
 	Mat61 K;
 	K << P_tilde*H.transpose()*(H*P_tilde*H.transpose() + R_baro).inverse();
-	ROS_INFO("INNOV: %lf", p- p_est);
+	//ROS_INFO("INNOV: %lf", p- p_est);
 	X_hat << X_tilde + K*(p - p_est);
 	
 	P_hat << (Eigen::MatrixXd::Identity(6,6) - K*H)*P_tilde;
@@ -197,7 +197,7 @@ void update_gnss(double z) {
 }
 
 void display(void) {
-	//ROS_INFO("[%lf] z: %g", last_time, X_tilde(0, 0));
+	ROS_INFO("[%lf] z: %g", last_time, X_tilde(0, 0));
 }
 
 void baro_callback(const sensor_msgs::FluidPressure::ConstPtr& data) {
@@ -274,9 +274,9 @@ int main(int argc, char ** argv) {
 	
 	ros::NodeHandle n;
 
-	ros::Subscriber baro_sub = n.subscribe("/iris_1/imu/atm_pressure", 1000, baro_callback);
+	ros::Subscriber baro_sub = n.subscribe("/iris_2/imu/atm_pressure", 1000, baro_callback);
 
-	ros::Subscriber gnss_sub = n.subscribe("/iris_1/global_position/raw/fix", 1000, gnss_callback);
+	ros::Subscriber gnss_sub = n.subscribe("/iris_2/global_position/raw/fix", 1000, gnss_callback);
 	
 	height_pub = n.advertise<geometry_msgs::Vector3Stamped>("/height", 1000);
 
